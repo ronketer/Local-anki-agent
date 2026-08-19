@@ -1,364 +1,500 @@
-# Autonomous Local Knowledge to Anki Pipeline
+# Local Anki Agent
 
-A **multi-agent AI system** that extracts knowledge from [Siyuan Notes](https://b3log.org/siyuan/) and generates optimized [Anki](https://apps.ankiweb.net/) flashcards using [Microsoft AutoGen](https://microsoft.github.io/autogen/).
+A local-first multi-agent pipeline that turns Siyuan notes into reviewed Anki flashcards using AutoGen and an Ollama/OpenAI-compatible model.
 
-> **Privacy-First**: Runs entirely locally using Ollama with GPU acceleration. No data leaves your machine.
+The key design rule is simple: **LLMs generate and review content; deterministic application code owns authorization, persistence, recovery, and Anki writes.**
 
 ![Python](https://img.shields.io/badge/python-3.13+-blue.svg)
 ![AutoGen](https://img.shields.io/badge/AutoGen-0.4+-green.svg)
-![Ollama](https://img.shields.io/badge/Ollama-0.17+-orange.svg)
+![Ollama](https://img.shields.io/badge/Ollama-local--first-orange.svg)
+![CI](https://github.com/ronketer/local-anki-agent/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
-## Architecture Decisions
+## What This Project Demonstrates
 
-This pipeline demonstrates **production-grade agentic design patterns** with explicit tradeoffs. All architectural decisions are enforced in code, not just in prompts.
+- **Deterministic orchestration around LLM agents** instead of model-owned workflow control
+- **Exact human authorization before side effects**
+- **Capability separation**: agents may read source material, but no agent receives the Anki write capability
+- **Durable workflow state** persisted as validated Pydantic JSON
+- **Idempotent Anki writes** using application-owned tags and reconciliation
+- **Crash/timeout recovery** with `--resume <RUN_ID>` without rerunning the LLM workflow
+- **Typed integration failures and bounded retries** for operations that are safe to repeat
+- **Offline automated tests and CI** with `uv`, Ruff, and pytest
 
-### 1. Code-Driven Routing (Deterministic State Machine)
-
-```
-User → Knowledge_Manager → Card_Writer → Card_Reviewer → Admin → [loop or terminate]
-```
-
-Agent handoffs use a **`selector_func` state machine** rather than LLM-chosen routing:
-
-- **Why**: Makes control flow testable, auditable, and free of inference cost on orchestration decisions
-- **Tradeoff**: Less flexible if you need dynamic agent selection, but vastly simpler debugging
-- **Implementation**: `routing.py` contains the routing policy as pure Python with no AutoGen dependency
-
-### 2. Reflection Loop with Rejection Guardrail
-
-The **Card_Reviewer → Card_Writer feedback loop** automatically runs until cards pass quality checks:
-
-- **Why**: Iterative refinement catches obvious failures (lists, verbose answers) without human input
-- **Guardrail**: Loop caps at **2 rejections** before escalating to human review
-- **Why the cap**: Prevents runaway rewrites and model-specific failure modes (e.g., smaller models stuck in loops)
-- **Implementation**: Guardrail enforced in `selector_func`, not just in prompts — a code guarantee, not a hope
-
-### 3. Code-Enforced Human Approval Before Writes
-
-No card reaches Anki without an explicit terminal `APPROVE`:
-
-- **Capability boundary**: The `Knowledge_Manager` only receives `fetch_siyuan_notes`; no agent receives an Anki write tool
-- **Typed authorization**: The transcript is replayed through `PipelineRun`, and only exact protocol decisions advance state
-- **Application gate**: `write_approved_run()` calls `PipelineRun.begin_write()` before invoking AnkiConnect
-- **Invariant**: Reviewer approval, invalid human text, or malformed card JSON cannot authorize an Anki write
-
-### 4. Application-Owned Side Effects
-
-External writes are deliberately kept outside the LLM-controlled workflow:
-
-- **Read path**: The `Knowledge_Manager` may call `fetch_siyuan_notes()` to read local source material
-- **Write path**: Only application code may call `push_cards_batch()`, through `write_approved_run()`
-- **Why**: Prompt instructions are not an authorization boundary; removing the tool from agents makes the rule enforceable
-- **Typed failures**: Adapters raise structured Siyuan/Anki exceptions instead of returning `"Error: ..."` strings
-- **Safe retry boundary**: Read-only Siyuan fetches use bounded exponential backoff for transient failures
-- **No unsafe write retries**: Anki writes are not automatically retried until idempotency and partial-write recovery are implemented
-
-### 5. Typed Integration Failures and Retry Policy
-
-External HTTP adapters classify failures before returning control to the workflow:
-
-```text
-Siyuan/Anki HTTP call
-        |
-        +-- timeout / connection / 5xx -> transient integration error
-        |
-        +-- rejected / malformed response -> permanent integration error
-        |
-        +-- malformed application payload -> validation error
-```
-
-`retry_call()` retries only `TransientIntegrationError` with bounded exponential backoff.
-The application currently applies it to the read-only Siyuan prefetch path.
-
-Anki failures are classified as transient or permanent, but writes are deliberately **not**
-retried automatically yet. A failed batch may have written some cards before the failure,
-so retrying the whole batch without idempotency could create duplicates. Partial-write
-recovery is the next hardening step.
-
-### 6. Structured Observability via Logging
-
-Each run writes a **`logs/{timestamp}.json`** file with full execution trace:
-
-**Implementation** (`logger.py`):
-```python
-class PipelineLogger:
-    def log_agent_message(agent: str, content: str, type: str) -> None
-    def log_tool_call(agent: str, tool: str, input: dict, result: str) -> None
-    def log_rejection(agent: str, reason: str) -> None  # Increments rejection_count, triggers guardrail at 2
-    def save() -> Path  # Writes timestamped JSON file to logs/
-```
-
-**Example log entry:**
-```json
-{
-  "timestamp": "2026-05-12T14:24:12.345678",
-  "agent": "Card_Reviewer",
-  "type": "rejection",
-  "reason": "Back has multiple answers (violates MIP)",
-  "rejection_count": 1,
-  "guardrail_active": false
-}
-```
-
-**Why this matters:**
-- **Debugging**: Trace exactly what each agent said and why
-- **Auditing**: Verify the decision path before cards were written to Anki
-- **Guardrails**: See when rejection caps (2) triggered human escalation
-
-## Features
-
-- **Quality-First Card Generation**: Cards follow [SuperMemo's 20 Rules](https://supermemo.guru/wiki/20_rules_of_knowledge_formulation) (Minimum Information Principle)
-- **Iterative Refinement**: Reviewer agent sends cards back for revision until they pass quality checks
-- **Code-Enforced Human Oversight**: Agents cannot access the Anki write capability; exact human approval is required
-- **Local-First**: Works with Ollama or any OpenAI-compatible LLM server - no cloud API keys required
-- **GPU Acceleration**: Ollama 0.17+ supports Intel Arc, NVIDIA, and AMD GPUs
-- **Structured Logging**: JSON traces of every run for debugging and auditing
-- **Pydantic Validation**: Cards validated against schema before writing to Anki (prevents malformed data)
-
-## Testing
-
-The core reliability suite runs without Siyuan, Anki, an LLM server, or AutoGen:
-
-```bash
-python -m pytest
-```
-
-The tests cover:
-
-- typed workflow transitions and exact approval parsing
-- reviewer rejection and escalation behavior
-- transcript replay from untrusted agent output
-- invalid/malformed card output
-- deterministic routing policy
-- the agent capability policy (`Knowledge_Manager` has no Anki write tool)
-- the hard invariant that an unapproved run performs **zero Anki writes**
-- typed transient vs permanent Siyuan/Anki integration failures
-- bounded retry behavior for safe read operations
-- fail-fast behavior for permanent and unexpected failures
-- the rule that Anki writes are attempted only once until idempotency exists
-
-For a fast syntax check:
-
-```bash
-python -m compileall -q main.py src tests
-```
-
-## Architecture Diagram
+## Architecture
 
 ```mermaid
 flowchart TD
+    User((User))
     Siyuan[(Siyuan Notes)]
     Anki[(AnkiConnect)]
+    Store[(run_state/<run_id>.json)]
 
-    subgraph Agents["Multi-Agent Conversation"]
+    subgraph Agents["AutoGen Conversation"]
         KM[Knowledge_Manager]
         CW[Card_Writer]
         CR[Card_Reviewer]
-        Admin[/Admin Human Gate/]
+        Admin[/Human approval gate/]
     end
 
-    subgraph Application["Deterministic Application Boundary"]
-        Replay[Replay transcript into PipelineRun]
-        Gate{can_write?}
-        Writer[write_approved_run]
+    subgraph App["Deterministic Application Boundary"]
+        Replay[Replay transcript]
+        Run[PipelineRun state machine]
+        Gate{Authorized to write?}
+        Writer[Idempotent AnkiWriter]
     end
 
-    User((User)) --> KM
+    User --> KM
     KM -- "fetch_siyuan_notes()" --> Siyuan
     KM --> CW
     CW --> CR
     CR -- "REJECTED" --> CW
     CR -- "APPROVED" --> Admin
-    Admin -- "REJECT" --> CW
-    Admin -- "APPROVE" --> KM
-    KM --> Done([TERMINATE])
 
     Agents --> Replay
-    Replay --> Gate
+    Replay --> Run
+    Run --> Gate
     Gate -- "no" --> NoWrite([No side effect])
-    Gate -- "yes" --> Writer
-    Writer -- "push_cards_batch()" --> Anki
+    Gate -- "yes" --> Store
+    Store --> Writer
+
+    Writer -- "findNotes(tag)" --> Anki
+    Writer -- "addNote(..., tags=[key])" --> Anki
+    Writer --> Store
 ```
 
-**Execution Flow:**
-1. **Knowledge_Manager** reads source notes from Siyuan; it has no Anki write capability
-2. **Card_Writer** creates flashcards following the Minimum Information Principle
-3. **Card_Reviewer** validates quality → rejects poor cards (max 2 times, then escalates)
-4. **Admin** provides an exact `APPROVE` or `REJECT` decision
-5. The application replays the transcript into a typed **`PipelineRun`**
-6. Only an authorized run reaches **`write_approved_run()`**, which owns the Anki side effect
-7. **Logging** traces the conversation and application write result
+The AutoGen conversation is treated as **untrusted input**. After it ends, application code rebuilds authoritative state by replaying validated cards and exact protocol decisions into `PipelineRun`.
+
+## Workflow
+
+```text
+Siyuan
+  ↓
+Knowledge_Manager
+  ↓
+Card_Writer
+  ↓
+Card_Reviewer
+  ├── REJECTED → Card_Writer
+  └── APPROVED
+        ↓
+Human APPROVE / REJECT
+        ↓
+PipelineRun
+        ↓
+persist approved manifest
+        ↓
+idempotent AnkiWriter
+        ↓
+AnkiConnect
+```
+
+The reviewer → writer reflection loop is capped at two rejections before escalation to human review.
+
+## Reliability Design
+
+### Deterministic routing
+
+Agent handoffs use application code rather than LLM-selected orchestration.
+
+**Why:** routing becomes testable, auditable, and free of extra inference cost.
+
+**Tradeoff:** less dynamic than model-selected routing, but better suited to a fixed study-card workflow.
+
+### Human approval is an authorization boundary
+
+Only the exact decision:
+
+```text
+APPROVE
+```
+
+authorizes a write.
+
+Reviewer approval, malformed card JSON, `NOT APPROVED`, or prose such as `I approve these` cannot authorize Anki access.
+
+The rule is enforced by `PipelineRun.can_write`, not by prompt instructions.
+
+### Agents do not own Anki writes
+
+The `Knowledge_Manager` may read Siyuan through `fetch_siyuan_notes()`.
+
+No AutoGen agent receives `addNote`, `findNotes`, `write_approved_run`, or persistence capabilities.
+
+```text
+Agents
+  ↓
+validated transcript replay
+  ↓
+PipelineRun
+  ↓
+human-authorized state
+  ↓
+AnkiWriter
+```
+
+### Durable approved-run state
+
+Before the first Anki side effect, the exact approved card set is persisted to:
+
+```text
+run_state/<run_id>.json
+```
+
+Each card has durable write metadata:
+
+```text
+index
+idempotency_key
+status = pending | written | failed
+anki_note_id
+failure
+```
+
+`RunStore` writes to a temporary file, flushes + `fsync`s it, then atomically replaces the destination with `os.replace()`.
+
+Pydantic validates state again when it is loaded.
+
+### Idempotent Anki writes
+
+Each approved card receives a deterministic run-scoped tag:
+
+```text
+local_anki_agent_id_<digest>
+```
+
+The key is derived from:
+
+```text
+run_id + card index + approved front + approved back
+```
+
+Before writing:
+
+```text
+findNotes(idempotency tag)
+        │
+        ├── one note      → mark already written
+        ├── no notes      → addNote(..., tags=[key])
+        └── multiple      → fail safely
+```
+
+Progress is persisted after entering the write stage, after each confirmed card, and after terminal success/failure.
+
+### Safe recovery after timeout or crash
+
+An `addNote` timeout is ambiguous:
+
+```text
+Application ── addNote ──► Anki
+                           │
+                       note created
+                           │
+Application ◄── timeout ───X
+```
+
+Blindly retrying could create a duplicate.
+
+Instead:
+
+```bash
+uv run python main.py --resume <RUN_ID>
+```
+
+Recovery:
+
+1. loads the previously approved `PipelineRun`;
+2. verifies that it is resumable;
+3. skips Siyuan and AutoGen initialization;
+4. preserves already-confirmed cards;
+5. reconciles unresolved cards by idempotency tag;
+6. creates only genuinely missing cards;
+7. persists progress until completion.
+
+Both persisted states are recoverable:
+
+```text
+WRITING + IN_PROGRESS
+FAILED  + FAILED/PARTIAL
+```
+
+The first matters when the process disappears before application code can record a terminal failure.
+
+### Typed failures and retry policy
+
+External adapters distinguish:
+
+```text
+timeout / connection / temporary 5xx
+    → transient integration failure
+
+rejected / malformed response
+    → permanent integration failure
+
+malformed application payload
+    → validation failure
+```
+
+`retry_call()` uses bounded exponential backoff for safe operations such as the read-only Siyuan prefetch.
+
+Anki writes are not blindly retried; unresolved cards are reconciled against Anki first.
+
+## State Model
+
+```text
+FETCHING
+   ↓
+GENERATING
+   ↓
+REVIEWING
+   ├── rejected → GENERATING
+   └── approved
+          ↓
+AWAITING_HUMAN
+   ├── REJECT → GENERATING
+   └── APPROVE
+          ↓
+WRITING
+   ├── all confirmed → COMPLETED
+   └── failure       → FAILED
+                         │
+                       --resume
+                         │
+                         └──► WRITING
+```
+
+Aggregate Anki write state is tracked separately:
+
+```text
+not_started
+in_progress
+partial
+succeeded
+failed
+```
+
+This preserves whether a failed run had already confirmed some cards.
+
+## Observability
+
+Each pipeline execution writes structured JSON events under `logs/`, including:
+
+- agent messages;
+- tool calls;
+- reviewer rejections;
+- human decisions;
+- integration failures;
+- final saved-card counts.
+
+Agent message content copied from the AutoGen result is currently truncated to 500 characters in `main.py`, so these files are an operational trace rather than a lossless transcript archive.
 
 ## Quick Start
 
 ### Prerequisites
 
-- **Python 3.13+**
-- **[Ollama](https://ollama.com/)** - Local LLM inference (0.17+ recommended for Intel GPU support)
-- **Siyuan Notes** with API enabled
-- **Anki** with [AnkiConnect](https://ankiweb.net/shared/info/2055492159) plugin
+- Python 3.13+
+- [`uv`](https://docs.astral.sh/uv/)
+- Ollama or another OpenAI-compatible LLM server
+- Siyuan Notes with its local API available
+- Anki with AnkiConnect
 
-### Installation
+### Install
 
 ```bash
-# Clone the repository
-git clone https://github.com/ronketer/siyuan-to-anki.git
-cd siyuan-to-anki
+git clone https://github.com/ronketer/local-anki-agent.git
+cd local-anki-agent
 
-# Create virtual environment (using uv)
-uv venv
-.venv\Scripts\activate  # Windows
-# source .venv/bin/activate  # Linux/Mac
-
-# Install dependencies
-uv sync
+uv sync --extra dev
 ```
 
-### Configuration
+`uv` creates/synchronizes the project `.venv` and installs `anki_pipeline` from the repository's `src/` layout.
+
+### Configure
 
 ```bash
-# Copy the example environment file
 cp .env.example .env
-
-# Edit .env with your settings
-notepad .env  # or your preferred editor
 ```
 
-Required settings:
-- TARGET_BLOCK_ID: The Siyuan block ID containing your notes
+PowerShell:
 
-### Usage
+```powershell
+Copy-Item .env.example .env
+```
 
-1. Start Ollama and pull a model:
-   ```bash
-   ollama serve  # if not already running
-   ollama pull qwen2.5-coder:3b  # Fast, reliable for multi-agent (~3B params)
-   ```
-2. Start Siyuan Notes
-3. Start Anki (with AnkiConnect running)
-4. Run the pipeline:
+At minimum, set:
+
+```env
+TARGET_BLOCK_ID=
+```
+
+The remaining local defaults are documented in `.env.example`.
+
+### Run
+
+Start Siyuan, Anki + AnkiConnect, and the configured LLM server:
 
 ```bash
-python main.py
+uv run python main.py
 ```
 
-> **Intel GPU Users**: Ollama 0.17+ automatically detects Intel Arc/Iris GPUs and uses Vulkan acceleration. No extra setup needed!
+Override the configured Siyuan block:
+
+```bash
+uv run python main.py --block <BLOCK_ID>
+```
+
+Resume a persisted interrupted write:
+
+```bash
+uv run python main.py --resume <RUN_ID>
+```
+
+Resume does not regenerate or rereview cards.
+
+## Testing
+
+The reliability suite is designed to run without live Siyuan, Anki, Ollama, or cloud APIs:
+
+```bash
+uv run pytest
+```
+
+Coverage includes:
+
+- exact reviewer/human decision parsing;
+- workflow transitions and rejection escalation;
+- transcript replay from untrusted agent output;
+- malformed card output;
+- deterministic routing/capability policy;
+- zero Anki writes without authorization;
+- typed integration failures and retry behavior;
+- atomic run-state persistence;
+- deterministic idempotency manifests;
+- per-card write progress;
+- already-present note reconciliation;
+- partial write failures;
+- duplicate idempotency-tag detection;
+- interrupted-run recovery.
+
+Lint:
+
+```bash
+uv run ruff check .
+```
+
+## Continuous Integration
+
+GitHub Actions runs on pushes and pull requests:
+
+```text
+checkout
+   ↓
+setup uv
+   ↓
+install pinned Python
+   ↓
+uv sync --locked --extra dev
+   ↓
+ruff check .
+   ↓
+pytest
+```
+
+The workflow requires no Siyuan, Anki, Ollama, or API secrets because external integrations are isolated in the automated tests.
 
 ## Project Structure
 
-```
+```text
 .
-+-- main.py                       # Entry point and application composition
-+-- logs/                         # Execution traces (JSON per run)
-+-- src/
-|   +-- anki_pipeline/
-|       +-- __init__.py
-|       +-- agents.py             # AutoGen participant definitions only
-|       +-- anki_writer.py        # Approval-gated application write boundary
-|       +-- config.py             # Environment configuration
-|       +-- errors.py             # Typed application/integration failures
-|       +-- logger.py             # Structured logging for observability
-|       +-- models.py             # Pydantic flashcard models
-|       +-- orchestrator.py       # Transcript -> trusted PipelineRun state
-|       +-- retry.py              # Bounded retry policy for safe operations
-|       +-- routing.py            # Deterministic routing and tool policy
-|       +-- tools.py              # Siyuan/Anki HTTP adapters
-|       +-- workflow.py           # Typed workflow state machine
-+-- tests/                        # Offline reliability/invariant tests
-+-- pyproject.toml                # Dependencies and project metadata
-+-- README.md
+├── .github/
+│   └── workflows/
+│       └── ci.yml
+├── main.py
+├── pyproject.toml
+├── uv.lock
+├── .env.example
+├── src/
+│   └── anki_pipeline/
+│       ├── agents.py
+│       ├── anki_writer.py
+│       ├── config.py
+│       ├── errors.py
+│       ├── logger.py
+│       ├── models.py
+│       ├── orchestrator.py
+│       ├── retry.py
+│       ├── routing.py
+│       ├── run_store.py
+│       ├── tools.py
+│       └── workflow.py
+├── tests/
+├── logs/                    # runtime JSON traces
+└── run_state/               # durable local run snapshots; gitignored
 ```
 
-## Observability & Debugging
+## Configuration
 
-Every pipeline run produces a **`logs/{timestamp}.json`** file with a complete execution trace:
-
-```json
-{
-  "run_id": "2026-05-12T14:23:45.123456",
-  "entries": [
-    {
-      "timestamp": "2026-05-12T14:23:45.234567",
-      "agent": "Card_Reviewer",
-      "type": "rejection",
-      "reason": "Back has multiple answers (violates MIP)",
-      "rejection_count": 1
-    },
-    {
-      "timestamp": "2026-05-12T14:24:12.345678",
-      "agent": "Admin",
-      "type": "approval",
-      "card_count": 8
-    }
-  ]
-}
-```
-
-**Why this matters:**
-- **Debugging**: Trace exactly what each agent said and why
-- **Auditing**: Verify the decision path before cards were written
-- **Guardrails**: See when rejection caps triggered human escalation
-
-## Flashcard Quality Standards
-
-Cards are validated against [SuperMemo's 20 Rules of Formulating Knowledge](https://www.supermemo.com/en/blog/twenty-rules-of-formulating-knowledge):
-
-1. **Minimum Information Principle**: One fact per card
-2. **No Sets**: Avoid asking for lists of items
-3. **Cloze Format**: Use fill-in-the-blank for complex facts
-4. **Clean Text**: No formatting artifacts or tags
-
-## LLM Configuration
-
-### Model Requirements
-
-This pipeline requires a model with **strong instruction-following** capabilities to properly execute multi-agent workflows. Smaller models (< 4B parameters) may skip agents or ignore the reflection loop.
-
-### Ollama (Recommended)
-
-Best for local inference with GPU acceleration:
+Representative defaults:
 
 ```env
+TARGET_BLOCK_ID=
+
+SIYUAN_API_TOKEN=
+SIYUAN_API_URL=http://127.0.0.1:6806/api/block/getBlockKramdown
+
 LLM_BASE_URL=http://127.0.0.1:11434/v1
-LLM_MODEL_ID=qwen2.5-coder:3b  # ~3B params, fast and reliable
+LLM_MODEL_ID=qwen2.5-coder:3b
+LLM_PROVIDER=ollama
+LLM_API_KEY=placeholder
+
+ANKI_CONNECT_URL=http://localhost:8765
+ANKI_DECK_NAME=Default
 ```
 
-> ⚠️ **Model Size Warning**: Models smaller than ~4B parameters may not follow multi-agent workflows correctly. They tend to skip agents, ignore the reflection loop, or call tools with placeholder values. Use 4B+ parameter models for reliable results.
+The default setup is **local-first**, not local-only. If `LLM_BASE_URL` points to a cloud provider, source content sent to that provider leaves the local machine.
 
-### OpenAI (Cloud)
+## Design Tradeoffs
 
-```env
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_MODEL_ID=gpt-4o-mini
-LLM_API_KEY=sk-your-api-key
-```
+### Deterministic state machine over agent-owned workflow control
 
-### Other OpenAI-Compatible Servers
+The workflow has known stages and safety boundaries. Encoding them in Python keeps the LLM focused on drafting and reviewing cards rather than control flow.
 
-Works with LM Studio, vLLM, or any server exposing `/v1/chat/completions`:
+### Atomic JSON state over a database
 
-```env
-LLM_BASE_URL=http://127.0.0.1:YOUR_PORT/v1
-LLM_MODEL_ID=your-model-name
-```
+Recovery is for a local single-user process. Validated JSON snapshots are simpler to operate and inspect than introducing SQLite, Redis, or a workflow engine.
 
-## Security Considerations
+### Reconciliation over blind retries
 
-- **No credentials in code**: All secrets loaded from environment variables
-- **Local inference**: Default configuration keeps all data on your machine
-- **No sensitive data in prompts**: Knowledge content stays within local network
-- **Token-based auth**: Siyuan API uses local token authentication
+After an ambiguous `addNote` timeout, querying Anki by an application-owned idempotency tag is safer than repeating the side effect immediately.
+
+### Run-scoped idempotency over global deduplication
+
+The key protects retries of the **same approved run**. It does not prevent the user from intentionally creating a similar card in a future run.
+
+## Security Boundaries
+
+- `.env` is gitignored; credentials come from environment variables.
+- No LLM agent receives the Anki write capability.
+- Exact human approval is required before writing.
+- Persisted run state is Pydantic-validated before recovery.
+- Path-like run IDs are rejected by `RunStore`.
+- Ambiguous Anki writes are reconciled before recreation.
+- Multiple notes sharing one idempotency tag fail safely instead of guessing.
 
 ## Technologies
 
-- [AutoGen 0.4+](https://microsoft.github.io/autogen/) - Multi-agent orchestration with `SelectorGroupChat`
-- [Pydantic v2](https://docs.pydantic.dev/) - Schema validation before Anki writes
-- [Ollama](https://ollama.com/) - Local LLM inference with GPU acceleration (Intel Arc, NVIDIA, AMD)
-- [Siyuan Notes](https://b3log.org/siyuan/) - Local-first knowledge management via REST API
-- [AnkiConnect](https://ankiweb.net/shared/info/2055492159) - Anki card creation via HTTP API
+- Python 3.13+
+- Microsoft AutoGen AgentChat
+- Pydantic v2
+- Requests
+- Ollama / OpenAI-compatible model APIs
+- Siyuan Notes
+- AnkiConnect
+- uv
+- pytest
+- Ruff
+- GitHub Actions
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
-
+MIT License — see [LICENSE](LICENSE).
