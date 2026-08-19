@@ -137,4 +137,7 @@ def test_failed_write_is_recorded(cards: FlashcardList) -> None:
 
     assert run.stage == WorkflowStage.FAILED
     assert run.write_status == WriteStatus.FAILED
-    assert run.failure == "AnkiConnect unavailable"
+    assert run.failure is not None
+    assert run.failure.code == "write_failed"
+    assert run.failure.message == "AnkiConnect unavailable"
+    assert run.failure.retryable is False

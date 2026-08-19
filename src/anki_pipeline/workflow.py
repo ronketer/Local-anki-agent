@@ -63,6 +63,15 @@ class InvalidWorkflowTransition(RuntimeError):
     """Raised when application code attempts an invalid state transition."""
 
 
+class FailureRecord(BaseModel):
+    """Structured failure metadata persisted with a pipeline run."""
+
+    code: str
+    message: str
+    retryable: bool = False
+    service: str | None = None
+
+
 class PipelineRun(BaseModel):
     """Explicit, serializable state for one pipeline execution."""
 
@@ -75,7 +84,7 @@ class PipelineRun(BaseModel):
     rejection_count: int = 0
     max_rejections: int = 2
     write_status: WriteStatus = WriteStatus.NOT_STARTED
-    failure: str | None = None
+    failure: FailureRecord | None = None
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
 
@@ -164,11 +173,15 @@ class PipelineRun(BaseModel):
         self.stage = WorkflowStage.COMPLETED
         self._touch()
 
-    def write_failed(self, reason: str) -> None:
-        """Record an unsuccessful write attempt."""
+    def write_failed(self, failure: FailureRecord | str) -> None:
+        """Record an unsuccessful write attempt with stable failure metadata."""
         self._require_stage(WorkflowStage.WRITING)
         self.write_status = WriteStatus.FAILED
-        self.failure = reason
+        self.failure = (
+            failure
+            if isinstance(failure, FailureRecord)
+            else FailureRecord(code="write_failed", message=failure)
+        )
         self.stage = WorkflowStage.FAILED
         self._touch()
 

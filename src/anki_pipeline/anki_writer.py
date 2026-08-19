@@ -9,45 +9,38 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from .errors import AnkiResponseError, PipelineError
 from .tools import push_cards_batch
-from .workflow import PipelineRun
+from .workflow import FailureRecord, PipelineRun
 
 
-class AnkiWriteError(RuntimeError):
-    """Raised when the external Anki write does not complete successfully."""
-
-
-def _result_indicates_failure(result: str) -> bool:
-    """Interpret the legacy string result returned by the Anki adapter."""
-    return any(
-        line.strip().startswith(("Error:", "Failed:"))
-        or ": Error:" in line
-        or ": Failed:" in line
-        for line in result.splitlines()
-    )
+def _failure_record(error: PipelineError) -> FailureRecord:
+    """Convert a typed application error into persisted workflow metadata."""
+    return FailureRecord(**error.as_dict())
 
 
 def write_approved_run(
     run: PipelineRun,
     write_batch: Callable[[str], str] = push_cards_batch,
 ) -> str:
-    """Write an explicitly approved run to Anki exactly through this boundary.
+    """Write an explicitly approved run to Anki through this boundary.
 
-    ``PipelineRun.begin_write`` is called before the adapter, so an unapproved
-    run fails before any external side effect is attempted.
+    Writes are deliberately not retried here. Until Commit 4 adds idempotency
+    and partial-write recovery, an automatic retry could duplicate cards that
+    were successfully created before a connection failure.
     """
     run.begin_write()
     payload = run.cards.model_dump_json()
 
     try:
         result = write_batch(payload)
+    except PipelineError as exc:
+        run.write_failed(_failure_record(exc))
+        raise
     except Exception as exc:
-        run.write_failed(str(exc))
-        raise AnkiWriteError(str(exc)) from exc
-
-    if _result_indicates_failure(result):
-        run.write_failed(result)
-        raise AnkiWriteError(result)
+        error = AnkiResponseError(f"Unexpected Anki adapter failure: {exc}")
+        run.write_failed(_failure_record(error))
+        raise error from exc
 
     run.write_succeeded()
     return result

@@ -27,10 +27,12 @@ from autogen_agentchat.teams import SelectorGroupChat
 from autogen_agentchat.ui import Console
 
 from src.anki_pipeline.agents import create_agents, create_model_client
-from src.anki_pipeline.anki_writer import AnkiWriteError, write_approved_run
+from src.anki_pipeline.anki_writer import write_approved_run
 from src.anki_pipeline.config import config
+from src.anki_pipeline.errors import ConfigurationError, PipelineError
 from src.anki_pipeline.logger import PipelineLogger
 from src.anki_pipeline.orchestrator import replay_workflow
+from src.anki_pipeline.retry import retry_call
 from src.anki_pipeline.routing import selector_func
 from src.anki_pipeline.workflow import HumanDecision, parse_human_decision
 
@@ -134,11 +136,16 @@ async def main() -> int:
         config.TARGET_BLOCK_ID = args.block
 
     # Validate configuration
-    errors = config.validate()
-    if errors:
-        for error in errors:
-            print(f'Configuration Error: {error}')
-        print('\nPlease check your .env file.')
+    try:
+        config.require_valid()
+    except ConfigurationError as exc:
+        print(f'Configuration Error: {exc}')
+        print('\nPlease check your .env file or provide --block.')
+        logger.log_agent_message(
+            'Application',
+            json.dumps(exc.as_dict(), ensure_ascii=False),
+            'configuration_error',
+        )
         logger.log_outcome('error', saved_cards=0)
         logger.save()
         return 1
@@ -165,11 +172,21 @@ When prompted, type exactly: APPROVE or REJECT{RESET}
         f'Fetching block {config.TARGET_BLOCK_ID}',
         'tool_call',
     )
-    content = fetch_siyuan_notes(config.TARGET_BLOCK_ID)
-
-    if 'Error' in content or 'error' in content.lower():
-        print(f'{YELLOW}Warning: {content}{RESET}')
-        print('Continuing anyway - model will attempt to fetch...')
+    try:
+        content = retry_call(
+            lambda: fetch_siyuan_notes(config.TARGET_BLOCK_ID)
+        )
+    except PipelineError as exc:
+        print(
+            f'{YELLOW}Warning: Siyuan prefetch failed '
+            f'[{exc.code}, retryable={exc.retryable}]: {exc}{RESET}'
+        )
+        print('Continuing anyway - the agent workflow may attempt to fetch...')
+        logger.log_agent_message(
+            'Application',
+            json.dumps(exc.as_dict(), ensure_ascii=False),
+            'integration_error',
+        )
         prefetched_content = None
     else:
         # Parse and extract just the markdown
@@ -260,10 +277,17 @@ When prompted, type exactly: APPROVE or REJECT{RESET}
                 {'run_id': run.run_id, 'card_count': saved_card_count},
                 save_result,
             )
-        except AnkiWriteError as exc:
+        except PipelineError as exc:
             write_failed = True
-            print(f'{YELLOW}Anki write failed: {exc}{RESET}')
-            logger.log_agent_message('Application', str(exc), 'error')
+            print(
+                f'{YELLOW}Anki write failed '
+                f'[{exc.code}, retryable={exc.retryable}]: {exc}{RESET}'
+            )
+            logger.log_agent_message(
+                'Application',
+                json.dumps(exc.as_dict(), ensure_ascii=False),
+                'integration_error',
+            )
     else:
         print(
             f'{DIM}No Anki write performed '

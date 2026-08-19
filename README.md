@@ -50,9 +50,33 @@ External writes are deliberately kept outside the LLM-controlled workflow:
 - **Read path**: The `Knowledge_Manager` may call `fetch_siyuan_notes()` to read local source material
 - **Write path**: Only application code may call `push_cards_batch()`, through `write_approved_run()`
 - **Why**: Prompt instructions are not an authorization boundary; removing the tool from agents makes the rule enforceable
-- **Current limitation**: AnkiConnect still returns legacy string errors; typed integration failures and idempotent recovery are planned hardening steps
+- **Typed failures**: Adapters raise structured Siyuan/Anki exceptions instead of returning `"Error: ..."` strings
+- **Safe retry boundary**: Read-only Siyuan fetches use bounded exponential backoff for transient failures
+- **No unsafe write retries**: Anki writes are not automatically retried until idempotency and partial-write recovery are implemented
 
-### 5. Structured Observability via Logging
+### 5. Typed Integration Failures and Retry Policy
+
+External HTTP adapters classify failures before returning control to the workflow:
+
+```text
+Siyuan/Anki HTTP call
+        |
+        +-- timeout / connection / 5xx -> transient integration error
+        |
+        +-- rejected / malformed response -> permanent integration error
+        |
+        +-- malformed application payload -> validation error
+```
+
+`retry_call()` retries only `TransientIntegrationError` with bounded exponential backoff.
+The application currently applies it to the read-only Siyuan prefetch path.
+
+Anki failures are classified as transient or permanent, but writes are deliberately **not**
+retried automatically yet. A failed batch may have written some cards before the failure,
+so retrying the whole batch without idempotency could create duplicates. Partial-write
+recovery is the next hardening step.
+
+### 6. Structured Observability via Logging
 
 Each run writes a **`logs/{timestamp}.json`** file with full execution trace:
 
@@ -109,6 +133,10 @@ The tests cover:
 - deterministic routing policy
 - the agent capability policy (`Knowledge_Manager` has no Anki write tool)
 - the hard invariant that an unapproved run performs **zero Anki writes**
+- typed transient vs permanent Siyuan/Anki integration failures
+- bounded retry behavior for safe read operations
+- fail-fast behavior for permanent and unexpected failures
+- the rule that Anki writes are attempted only once until idempotency exists
 
 For a fast syntax check:
 
@@ -229,9 +257,11 @@ python main.py
 |       +-- agents.py             # AutoGen participant definitions only
 |       +-- anki_writer.py        # Approval-gated application write boundary
 |       +-- config.py             # Environment configuration
+|       +-- errors.py             # Typed application/integration failures
 |       +-- logger.py             # Structured logging for observability
 |       +-- models.py             # Pydantic flashcard models
 |       +-- orchestrator.py       # Transcript -> trusted PipelineRun state
+|       +-- retry.py              # Bounded retry policy for safe operations
 |       +-- routing.py            # Deterministic routing and tool policy
 |       +-- tools.py              # Siyuan/Anki HTTP adapters
 |       +-- workflow.py           # Typed workflow state machine

@@ -2,7 +2,11 @@
 
 import pytest
 
-from src.anki_pipeline.anki_writer import AnkiWriteError, write_approved_run
+from src.anki_pipeline.anki_writer import write_approved_run
+from src.anki_pipeline.errors import (
+    AnkiResponseError,
+    AnkiUnavailableError,
+)
 from src.anki_pipeline.models import Flashcard, FlashcardList
 from src.anki_pipeline.workflow import (
     InvalidWorkflowTransition,
@@ -60,30 +64,55 @@ def test_approved_run_calls_adapter_and_completes() -> None:
     assert '"front":"Q?"' in calls[0]
     assert run.stage == WorkflowStage.COMPLETED
     assert run.write_status == WriteStatus.SUCCEEDED
+    assert run.failure is None
 
 
-def test_adapter_exception_marks_run_failed() -> None:
+def test_typed_transient_failure_is_preserved_in_run_state() -> None:
+    calls = 0
+
     def failing_writer(payload: str) -> str:
-        raise ConnectionError("Anki unavailable")
+        nonlocal calls
+        calls += 1
+        raise AnkiUnavailableError("Anki unavailable")
 
     run = approved_run()
 
-    with pytest.raises(AnkiWriteError, match="Anki unavailable"):
+    with pytest.raises(AnkiUnavailableError, match="Anki unavailable"):
         write_approved_run(run, write_batch=failing_writer)
 
+    # Writes are not automatically retried until idempotency exists.
+    assert calls == 1
     assert run.stage == WorkflowStage.FAILED
     assert run.write_status == WriteStatus.FAILED
-    assert run.failure == "Anki unavailable"
+    assert run.failure is not None
+    assert run.failure.code == "anki_unavailable"
+    assert run.failure.retryable is True
+    assert run.failure.service == "anki"
 
 
-def test_legacy_failure_result_marks_run_failed() -> None:
+def test_permanent_failure_is_preserved_in_run_state() -> None:
+    def failing_writer(payload: str) -> str:
+        raise AnkiResponseError("duplicate note")
+
     run = approved_run()
 
-    with pytest.raises(AnkiWriteError, match="Anki not running"):
-        write_approved_run(
-            run,
-            write_batch=lambda payload: "Error: Anki not running",
-        )
+    with pytest.raises(AnkiResponseError, match="duplicate note"):
+        write_approved_run(run, write_batch=failing_writer)
+
+    assert run.failure is not None
+    assert run.failure.code == "anki_response_error"
+    assert run.failure.retryable is False
+
+
+def test_unexpected_adapter_exception_is_classified() -> None:
+    def broken_writer(payload: str) -> str:
+        raise RuntimeError("unexpected adapter bug")
+
+    run = approved_run()
+
+    with pytest.raises(AnkiResponseError, match="Unexpected Anki adapter failure"):
+        write_approved_run(run, write_batch=broken_writer)
 
     assert run.stage == WorkflowStage.FAILED
-    assert run.write_status == WriteStatus.FAILED
+    assert run.failure is not None
+    assert run.failure.code == "anki_response_error"

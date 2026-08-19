@@ -8,6 +8,8 @@ import os
 
 from dotenv import load_dotenv
 
+from .errors import ConfigurationError
+
 load_dotenv()
 
 
@@ -31,13 +33,18 @@ class Config:
     ANKI_CONNECT_URL: str = os.getenv("ANKI_CONNECT_URL", "http://localhost:8765")
     ANKI_DECK_NAME: str = os.getenv("ANKI_DECK_NAME", "Default")
 
-    @classmethod
-    def validate(cls) -> list[str]:
-        """Validate required configuration. Returns list of missing variables."""
+    def validate(self) -> list[str]:
+        """Return human-readable configuration validation errors."""
         errors = []
-        if not cls.TARGET_BLOCK_ID:
+        if not self.TARGET_BLOCK_ID:
             errors.append("TARGET_BLOCK_ID is required")
         return errors
+
+    def require_valid(self) -> None:
+        """Raise a typed configuration error when required settings are missing."""
+        errors = self.validate()
+        if errors:
+            raise ConfigurationError("; ".join(errors))
 
 
 config = Config()
