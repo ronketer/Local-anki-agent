@@ -25,12 +25,14 @@ import sys
 from autogen_agentchat.conditions import MaxMessageTermination, TextMentionTermination
 from autogen_agentchat.teams import SelectorGroupChat
 from autogen_agentchat.ui import Console
-from pydantic import ValidationError
 
-from src.anki_pipeline.agents import create_agents, create_model_client, selector_func
+from src.anki_pipeline.agents import create_agents, create_model_client
+from src.anki_pipeline.anki_writer import AnkiWriteError, write_approved_run
 from src.anki_pipeline.config import config
 from src.anki_pipeline.logger import PipelineLogger
-from src.anki_pipeline.models import FlashcardList
+from src.anki_pipeline.orchestrator import replay_workflow
+from src.anki_pipeline.routing import selector_func
+from src.anki_pipeline.workflow import HumanDecision, parse_human_decision
 
 
 def parse_args() -> argparse.Namespace:
@@ -149,7 +151,7 @@ async def main() -> int:
   Model:  {config.LLM_MODEL_ID}
 
 {DIM}Workflow: Fetch -> Write -> Review -> [You Approve] -> Save to Anki
-When prompted, type: APPROVE / REJECT / or feedback{RESET}
+When prompted, type exactly: APPROVE or REJECT{RESET}
 ''')
 
     model_client = create_model_client()
@@ -158,7 +160,11 @@ When prompted, type: APPROVE / REJECT / or feedback{RESET}
     # Pre-fetch content to work around models that struggle with tool calling
     from src.anki_pipeline.tools import fetch_siyuan_notes
     print(f'{DIM}Fetching content from Siyuan...{RESET}')
-    logger.log_agent_message('Knowledge_Manager', f'Fetching block {config.TARGET_BLOCK_ID}', 'tool_call')
+    logger.log_agent_message(
+        'Knowledge_Manager',
+        f'Fetching block {config.TARGET_BLOCK_ID}',
+        'tool_call',
+    )
     content = fetch_siyuan_notes(config.TARGET_BLOCK_ID)
 
     if 'Error' in content or 'error' in content.lower():
@@ -202,12 +208,12 @@ When prompted, type: APPROVE / REJECT / or feedback{RESET}
             f"---\n{prefetched_content}\n---\n\n"
             f"Create Anki flashcards from this content. "
             f"Card_Writer: draft the cards. Card_Reviewer: review them. "
-            f"Admin will approve. Then Knowledge_Manager saves them with push_cards_batch."
+            f"Admin will approve. The application saves cards only after the agent workflow ends."
         )
     else:
         task = (
             f"Fetch the notes for Siyuan block ID '{config.TARGET_BLOCK_ID}'. "
-            'Draft the Anki cards, and once approved, save them.'
+            'Draft and review the Anki cards. Admin will provide the final approval.'
         )
 
     # Run pipeline and capture result
@@ -225,67 +231,51 @@ When prompted, type: APPROVE / REJECT / or feedback{RESET}
                 elif 'APPROVED' in content:
                     logger.log_agent_message(source, content, 'approval_check')
             elif source == 'Admin':
-                if 'APPROVE' in content.upper():
-                    cards = extract_json_cards(str(msg.content))
-                    card_count = len(cards.get('cards', [])) if cards else 0
-                    logger.log_approval(card_count)
-                else:
+                decision = parse_human_decision(content)
+                if decision == HumanDecision.APPROVED:
+                    logger.log_approval(0)
+                elif decision == HumanDecision.REJECTED:
                     logger.log_rejection(source, content)
+                else:
+                    logger.log_agent_message(source, content, 'invalid_human_decision')
             else:
                 logger.log_agent_message(source, content, 'message')
 
-    # Fallback: If model didn't properly call push_cards_batch, do it manually
-    # This handles smaller models that output pseudo-function-calls as text
-    cards_saved = False
-    final_cards = None
-
-    for msg in reversed(result.messages):
-        # Check if push_cards_batch was successfully called
-        if hasattr(msg, 'content') and 'Card added' in str(msg.content):
-            cards_saved = True
-            break
-        # Extract final approved cards from Card_Writer
-        if hasattr(msg, 'source') and msg.source == 'Card_Writer':
-            final_cards = extract_json_cards(str(msg.content))
-            if final_cards:
-                break
-
-    # If cards weren't saved but we have approved cards, save them now
-    admin_approved = any(
-        hasattr(m, 'source') and m.source == 'Admin' and 'APPROVE' in str(m.content).upper()
-        for m in result.messages
-    )
+    # Rebuild authoritative application state from the untrusted conversation.
+    # Only exact protocol decisions and validated card JSON advance the state.
+    run = replay_workflow(config.TARGET_BLOCK_ID, result.messages)
 
     saved_card_count = 0
-    if admin_approved and not cards_saved and final_cards:
-        # Validate cards against Pydantic schema
-        try:
-            validated = FlashcardList.model_validate({"cards": final_cards.get('cards', [])})
-            final_cards = {"cards": [c.model_dump() for c in validated.cards]}
-        except ValidationError as e:
-            print(f'{YELLOW}Validation error: {e}{RESET}')
-            logger.log_agent_message('Knowledge_Manager', f'Validation failed: {str(e)}', 'error')
-            final_cards = None
+    write_failed = False
 
-        if final_cards:
-            print(f'\n{YELLOW}Saving cards (validated)...{RESET}')
-            from src.anki_pipeline.tools import push_cards_batch
-            save_result = push_cards_batch(json.dumps(final_cards))
+    if run.can_write:
+        print(f'\n{YELLOW}Saving explicitly approved cards...{RESET}')
+        try:
+            save_result = write_approved_run(run)
+            saved_card_count = len(run.cards.cards)
             print(f'{GREEN}{save_result}{RESET}')
-            saved_card_count = len(final_cards.get('cards', []))
             logger.log_tool_call(
-                'Knowledge_Manager',
-                'push_cards_batch',
-                {'cards': final_cards},
-                save_result
+                'Application',
+                'write_approved_run',
+                {'run_id': run.run_id, 'card_count': saved_card_count},
+                save_result,
             )
+        except AnkiWriteError as exc:
+            write_failed = True
+            print(f'{YELLOW}Anki write failed: {exc}{RESET}')
+            logger.log_agent_message('Application', str(exc), 'error')
+    else:
+        print(
+            f'{DIM}No Anki write performed '
+            f'(stage={run.stage.value}, approved={run.human_decision.value}).{RESET}'
+        )
 
     print(f'\n{CYAN}Pipeline complete.{RESET}')
-    logger.log_outcome('success', saved_cards=saved_card_count)
+    logger.log_outcome('error' if write_failed else 'success', saved_cards=saved_card_count)
     log_path = logger.save()
     print(f'{DIM}Log saved: {log_path}{RESET}')
     
-    return 0
+    return 1 if write_failed else 0
 
 
 if __name__ == '__main__':

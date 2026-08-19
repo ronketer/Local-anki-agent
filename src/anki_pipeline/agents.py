@@ -1,13 +1,14 @@
 """Agent definitions and team orchestration.
 
-This module implements a multi-agent system using AutoGen's SelectorGroupChat
-pattern with a custom routing function for deterministic agent handoffs.
+This module defines the AutoGen participants. Deterministic routing and tool
+capability policy live separately in ``routing.py`` so they can be tested
+without starting an LLM runtime.
 
 Architecture:
-    User -> Knowledge_Manager -> Card_Writer -> Card_Reviewer -> Admin -> [loop or save]
+    User -> Knowledge_Manager -> Card_Writer -> Card_Reviewer -> Admin -> [loop or terminate]
 
 Agentic Design Patterns Used:
-    1. Tool Use: Agents call external APIs (Siyuan, Anki)
+    1. Tool Use: The Knowledge Manager can read from Siyuan
     2. Reflection: Card_Reviewer critiques the Card_Writer's output
     3. Multi-Agent Collaboration: Specialized agents with distinct roles
     4. Human-in-the-Loop: Admin provides final approval before saving
@@ -18,7 +19,7 @@ from autogen_agentchat.base import ChatAgent
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
 from .config import config
-from .tools import fetch_siyuan_notes, push_cards_batch
+from .routing import KNOWLEDGE_MANAGER_TOOLS, selector_func
 
 # System prompts following best practices for instruction clarity
 KNOWLEDGE_MANAGER_PROMPT = """You orchestrate a flashcard creation pipeline.
@@ -29,11 +30,13 @@ IF content is already provided in the message:
 IF you need to fetch content:
 - Use the fetch_siyuan_notes tool with the block ID.
 
-AFTER Admin says 'APPROVE':
-- Use push_cards_batch tool with the JSON cards from Card_Writer.
-- Then say TERMINATE.
+AFTER Admin says exactly 'APPROVE':
+- Acknowledge the approval and say TERMINATE.
+- Do not attempt to save cards yourself.
 
-IMPORTANT: When calling tools, use the proper tool calling mechanism."""
+IMPORTANT:
+- You may fetch source notes, but you never have permission to write to Anki.
+- The application performs the final Anki write outside the agent workflow."""
 
 CARD_WRITER_PROMPT = """You are an expert at creating effective Anki flashcards.
 
@@ -92,7 +95,7 @@ def create_agents(model_client: OpenAIChatCompletionClient) -> dict[str, ChatAge
         "knowledge_manager": AssistantAgent(
             name="Knowledge_Manager",
             model_client=model_client,
-            tools=[fetch_siyuan_notes, push_cards_batch],
+            tools=list(KNOWLEDGE_MANAGER_TOOLS),
             system_message=KNOWLEDGE_MANAGER_PROMPT,
         ),
         "card_writer": AssistantAgent(
@@ -110,52 +113,6 @@ def create_agents(model_client: OpenAIChatCompletionClient) -> dict[str, ChatAge
         "admin": UserProxyAgent(
             name="Admin",
             description="Human reviewer who approves flashcards before saving.",
-            input_func=lambda prompt: input("\n[APPROVE/REJECT/feedback] >>> "),
+            input_func=lambda prompt: input("\n[APPROVE/REJECT] >>> "),
         ),
     }
-
-
-def selector_func(messages: list) -> str | None:
-    """Custom routing function for deterministic agent handoffs.
-
-    This implements a state machine for the conversation flow:
-    User -> Knowledge_Manager -> Card_Writer -> Card_Reviewer -> Admin -> [loop]
-
-    Returns:
-        The name of the next agent to speak, or None for default selection.
-    """
-    if not messages or messages[-1].source == "user":
-        return "Knowledge_Manager"
-
-    last = messages[-1]
-
-    # Manager fetches notes -> Writer processes them
-    if last.source == "Knowledge_Manager":
-        return "Card_Writer"
-
-    # Writer creates cards -> Reviewer checks quality
-    if last.source == "Card_Writer":
-        return "Card_Reviewer"
-
-    # Reviewer approves -> Human review; Reviewer rejects -> Writer revises
-    if last.source == "Card_Reviewer":
-        if "APPROVED" in last.content:
-            return "Admin"
-
-        # Guardrail: If Reviewer has rejected 2+ times, escalate to Admin
-        rejection_count = sum(
-            1 for m in messages 
-            if getattr(m, "source", None) == "Card_Reviewer" and "REJECTED" in str(m.content)
-        )
-        if rejection_count >= 2:
-            return "Admin"
-
-        return "Card_Writer"
-
-    # Human approves -> Manager saves; Human rejects -> Writer revises
-    if last.source == "Admin":
-        if "APPROVE" in last.content.upper():
-            return "Knowledge_Manager"
-        return "Card_Writer"
-
-    return None
