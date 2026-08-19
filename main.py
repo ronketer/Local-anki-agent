@@ -34,8 +34,8 @@ from anki_pipeline.errors import ConfigurationError, PipelineError
 from anki_pipeline.logger import PipelineLogger
 from anki_pipeline.orchestrator import replay_workflow
 from anki_pipeline.retry import retry_call
-from anki_pipeline.run_store import RunStore
 from anki_pipeline.routing import selector_func
+from anki_pipeline.run_store import RunStore
 from anki_pipeline.workflow import (
     HumanDecision,
     InvalidWorkflowTransition,
