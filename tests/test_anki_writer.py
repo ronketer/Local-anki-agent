@@ -2,10 +2,10 @@
 
 import pytest
 
-from src.anki_pipeline.anki_writer import write_approved_run
-from src.anki_pipeline.errors import AnkiResponseError, AnkiUnavailableError
-from src.anki_pipeline.models import Flashcard, FlashcardList
-from src.anki_pipeline.workflow import (
+from anki_pipeline.anki_writer import write_approved_run
+from anki_pipeline.errors import AnkiResponseError, AnkiUnavailableError
+from anki_pipeline.models import Flashcard, FlashcardList
+from anki_pipeline.workflow import (
     InvalidWorkflowTransition,
     PipelineRun,
     WorkflowStage,

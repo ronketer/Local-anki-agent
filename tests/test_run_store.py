@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from src.anki_pipeline.models import Flashcard, FlashcardList
-from src.anki_pipeline.run_store import RunStore
-from src.anki_pipeline.workflow import PipelineRun, WriteItemStatus
+from anki_pipeline.models import Flashcard, FlashcardList
+from anki_pipeline.run_store import RunStore
+from anki_pipeline.workflow import PipelineRun, WriteItemStatus
 
 
 def approved_run() -> PipelineRun:

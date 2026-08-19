@@ -89,7 +89,7 @@ openai = [
 [[package]]
 name = "autonomous-local-knowledge-to-anki-pipeline"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "autogen-agentchat" },
     { name = "autogen-ext", extra = ["openai"] },

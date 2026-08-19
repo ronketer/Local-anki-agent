@@ -2,8 +2,8 @@
 
 from dataclasses import dataclass
 
-from src.anki_pipeline.orchestrator import replay_workflow
-from src.anki_pipeline.workflow import HumanDecision, WorkflowStage
+from anki_pipeline.orchestrator import replay_workflow
+from anki_pipeline.workflow import HumanDecision, WorkflowStage
 
 
 @dataclass

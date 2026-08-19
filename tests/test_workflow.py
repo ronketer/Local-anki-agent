@@ -2,8 +2,8 @@
 
 import pytest
 
-from src.anki_pipeline.models import Flashcard, FlashcardList
-from src.anki_pipeline.workflow import (
+from anki_pipeline.models import Flashcard, FlashcardList
+from anki_pipeline.workflow import (
     HumanDecision,
     InvalidWorkflowTransition,
     PipelineRun,

@@ -27,16 +27,16 @@ from autogen_agentchat.conditions import MaxMessageTermination, TextMentionTermi
 from autogen_agentchat.teams import SelectorGroupChat
 from autogen_agentchat.ui import Console
 
-from src.anki_pipeline.agents import create_agents, create_model_client
-from src.anki_pipeline.anki_writer import write_approved_run
-from src.anki_pipeline.config import config
-from src.anki_pipeline.errors import ConfigurationError, PipelineError
-from src.anki_pipeline.logger import PipelineLogger
-from src.anki_pipeline.orchestrator import replay_workflow
-from src.anki_pipeline.retry import retry_call
-from src.anki_pipeline.routing import selector_func
-from src.anki_pipeline.run_store import RunStore
-from src.anki_pipeline.workflow import (
+from anki_pipeline.agents import create_agents, create_model_client
+from anki_pipeline.anki_writer import write_approved_run
+from anki_pipeline.config import config
+from anki_pipeline.errors import ConfigurationError, PipelineError
+from anki_pipeline.logger import PipelineLogger
+from anki_pipeline.orchestrator import replay_workflow
+from anki_pipeline.retry import retry_call
+from anki_pipeline.run_store import RunStore
+from anki_pipeline.routing import selector_func
+from anki_pipeline.workflow import (
     HumanDecision,
     InvalidWorkflowTransition,
     parse_human_decision,
@@ -266,7 +266,7 @@ When prompted, type exactly: APPROVE or REJECT{RESET}
     agents = create_agents(model_client)
 
     # Pre-fetch content to work around models that struggle with tool calling
-    from src.anki_pipeline.tools import fetch_siyuan_notes
+    from anki_pipeline.tools import fetch_siyuan_notes
     print(f'{DIM}Fetching content from Siyuan...{RESET}')
     logger.log_agent_message(
         'Knowledge_Manager',

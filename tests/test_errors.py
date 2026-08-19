@@ -1,6 +1,6 @@
 """Tests for typed pipeline failures."""
 
-from src.anki_pipeline.errors import (
+from anki_pipeline.errors import (
     AnkiResponseError,
     AnkiUnavailableError,
     ConfigurationError,

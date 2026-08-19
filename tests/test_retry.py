@@ -2,11 +2,11 @@
 
 import pytest
 
-from src.anki_pipeline.errors import (
+from anki_pipeline.errors import (
     SiyuanResponseError,
     SiyuanUnavailableError,
 )
-from src.anki_pipeline.retry import RetryPolicy, retry_call
+from anki_pipeline.retry import RetryPolicy, retry_call
 
 
 def test_transient_read_succeeds_after_retries() -> None:

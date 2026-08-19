@@ -2,8 +2,8 @@
 
 from dataclasses import dataclass
 
-from src.anki_pipeline.routing import KNOWLEDGE_MANAGER_TOOLS, selector_func
-from src.anki_pipeline.tools import fetch_siyuan_notes, push_cards_batch
+from anki_pipeline.routing import KNOWLEDGE_MANAGER_TOOLS, selector_func
+from anki_pipeline.tools import fetch_siyuan_notes, push_cards_batch
 
 
 @dataclass

@@ -5,14 +5,14 @@ import json
 import pytest
 import requests
 
-from src.anki_pipeline.errors import (
+from anki_pipeline.errors import (
     AnkiResponseError,
     AnkiUnavailableError,
     PayloadValidationError,
     SiyuanResponseError,
     SiyuanUnavailableError,
 )
-from src.anki_pipeline.tools import (
+from anki_pipeline.tools import (
     _push_to_anki,
     add_note,
     fetch_siyuan_notes,

@@ -2,8 +2,8 @@
 
 import pytest
 
-from src.anki_pipeline.config import Config
-from src.anki_pipeline.errors import ConfigurationError
+from anki_pipeline.config import Config
+from anki_pipeline.errors import ConfigurationError
 
 
 def test_missing_block_id_raises_typed_configuration_error() -> None:
