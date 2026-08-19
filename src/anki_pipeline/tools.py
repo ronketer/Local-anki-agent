@@ -95,22 +95,12 @@ def fetch_siyuan_notes(
     return json.dumps(data, indent=2, ensure_ascii=False)
 
 
-def _push_to_anki(
-    front_text: Annotated[str, "The text for the front of the flashcard."],
-    back_text: Annotated[str, "The text for the back of the flashcard."],
-) -> str:
-    """Push a single flashcard to Anki via the AnkiConnect API."""
+def _anki_request(action: str, params: dict[str, object]) -> object:
+    """Call one AnkiConnect action and return its validated result."""
     payload = {
-        "action": "addNote",
+        "action": action,
         "version": 6,
-        "params": {
-            "note": {
-                "deckName": config.ANKI_DECK_NAME,
-                "modelName": "Basic",
-                "fields": {"Front": front_text, "Back": back_text},
-                "options": {"allowDuplicate": False},
-            }
-        },
+        "params": params,
     }
 
     try:
@@ -139,12 +129,76 @@ def _push_to_anki(
 
     error = response_data.get("error")
     if error is not None:
-        raise AnkiResponseError(f"AnkiConnect rejected the note: {error}")
+        raise AnkiResponseError(f"AnkiConnect rejected {action}: {error}")
 
-    if response_data.get("result") is None:
+    if "result" not in response_data:
+        raise AnkiResponseError(f"AnkiConnect {action} response is missing result")
+
+    return response_data["result"]
+
+
+def find_note_ids_by_tag(tag: str) -> list[int]:
+    """Return Anki note IDs carrying the exact application idempotency tag."""
+    if not tag:
+        raise PayloadValidationError("Anki idempotency tag must not be empty")
+
+    result = _anki_request("findNotes", {"query": f"tag:{tag}"})
+    if not isinstance(result, list) or any(
+        not isinstance(note_id, int) or isinstance(note_id, bool) for note_id in result
+    ):
+        raise AnkiResponseError("AnkiConnect findNotes returned invalid note ids")
+
+    return result
+
+
+def add_note(front_text: str, back_text: str, tags: list[str]) -> int:
+    """Create one Anki note carrying application-owned tags and return its ID."""
+    if not front_text.strip() or not back_text.strip():
+        raise PayloadValidationError("Anki note front and back must not be empty")
+    if not tags or any(not isinstance(tag, str) or not tag.strip() for tag in tags):
+        raise PayloadValidationError("Anki note must include non-empty tags")
+
+    result = _anki_request(
+        "addNote",
+        {
+            "note": {
+                "deckName": config.ANKI_DECK_NAME,
+                "modelName": "Basic",
+                "fields": {
+                    "Front": front_text.strip(),
+                    "Back": back_text.strip(),
+                },
+                "tags": tags,
+                "options": {"allowDuplicate": False},
+            }
+        },
+    )
+
+    if not isinstance(result, int) or isinstance(result, bool):
+        raise AnkiResponseError("AnkiConnect addNote response is missing a note id")
+
+    return result
+
+
+def _push_to_anki(
+    front_text: Annotated[str, "The text for the front of the flashcard."],
+    back_text: Annotated[str, "The text for the back of the flashcard."],
+) -> str:
+    """Compatibility wrapper for the legacy batch helper."""
+    result = _anki_request(
+        "addNote",
+        {
+            "note": {
+                "deckName": config.ANKI_DECK_NAME,
+                "modelName": "Basic",
+                "fields": {"Front": front_text, "Back": back_text},
+                "options": {"allowDuplicate": False},
+            }
+        },
+    )
+    if not isinstance(result, int) or isinstance(result, bool):
         raise AnkiResponseError("AnkiConnect response is missing a note id")
-
-    return f"Card added: {response_data['result']}"
+    return f"Card added: {result}"
 
 
 def push_cards_batch(
@@ -155,8 +209,8 @@ def push_cards_batch(
 ) -> str:
     """Push multiple validated flashcards to Anki.
 
-    This adapter intentionally does not retry writes. Until the write path is
-    idempotent, repeating a partially completed batch could create duplicates.
+    This legacy helper remains for compatibility and adapter-level tests. The
+    application write boundary uses per-card idempotency tags instead.
     """
     try:
         data = json.loads(cards_json)

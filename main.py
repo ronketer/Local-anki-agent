@@ -33,6 +33,7 @@ from src.anki_pipeline.errors import ConfigurationError, PipelineError
 from src.anki_pipeline.logger import PipelineLogger
 from src.anki_pipeline.orchestrator import replay_workflow
 from src.anki_pipeline.retry import retry_call
+from src.anki_pipeline.run_store import RunStore
 from src.anki_pipeline.routing import selector_func
 from src.anki_pipeline.workflow import HumanDecision, parse_human_decision
 
@@ -264,11 +265,14 @@ When prompted, type exactly: APPROVE or REJECT{RESET}
 
     saved_card_count = 0
     write_failed = False
+    run_store = RunStore()
 
     if run.can_write:
+        # Persist the exact human-approved payload before the first Anki side effect.
+        run_store.save(run)
         print(f'\n{YELLOW}Saving explicitly approved cards...{RESET}')
         try:
-            save_result = write_approved_run(run)
+            save_result = write_approved_run(run, save_run=run_store.save)
             saved_card_count = len(run.cards.cards)
             print(f'{GREEN}{save_result}{RESET}')
             logger.log_tool_call(

@@ -47,3 +47,6 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Durable local pipeline run state
+run_state/

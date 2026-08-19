@@ -9,6 +9,7 @@ from src.anki_pipeline.workflow import (
     PipelineRun,
     ReviewDecision,
     WorkflowStage,
+    WriteItemStatus,
     WriteStatus,
     parse_human_decision,
     parse_review_decision,
@@ -58,14 +59,20 @@ def test_happy_path_requires_human_approval_before_write(cards: FlashcardList) -
     run.human_approved()
 
     assert run.can_write is True
+    assert len(run.write_items) == 1
+    assert run.write_items[0].index == 0
+    assert run.write_items[0].status == WriteItemStatus.PENDING
+    assert run.write_items[0].idempotency_key.startswith("local_anki_agent_id_")
 
     run.begin_write()
     assert run.stage == WorkflowStage.WRITING
     assert run.write_status == WriteStatus.IN_PROGRESS
 
+    run.mark_item_written(0, 123)
     run.write_succeeded()
     assert run.stage == WorkflowStage.COMPLETED
     assert run.write_status == WriteStatus.SUCCEEDED
+    assert run.write_items[0].status == WriteItemStatus.WRITTEN
 
 
 def test_write_is_rejected_without_human_approval(cards: FlashcardList) -> None:
@@ -141,3 +148,88 @@ def test_failed_write_is_recorded(cards: FlashcardList) -> None:
     assert run.failure.code == "write_failed"
     assert run.failure.message == "AnkiConnect unavailable"
     assert run.failure.retryable is False
+
+
+def test_human_approval_builds_stable_unique_write_manifest() -> None:
+    cards = FlashcardList(
+        cards=[
+            Flashcard(front="Same?", back="Answer"),
+            Flashcard(front="Same?", back="Answer"),
+        ]
+    )
+    run = PipelineRun(
+        run_id="fixed-run-id",
+        block_id="20260101000000-test",
+    )
+    run.content_ready()
+    run.draft_ready(cards)
+    run.reviewer_approved()
+
+    run.human_approved()
+    first_keys = [item.idempotency_key for item in run.write_items]
+
+    assert len(first_keys) == 2
+    assert len(set(first_keys)) == 2
+
+    # Replaying the same approval snapshot produces the same run-scoped keys.
+    run.human_approved()
+    assert [item.idempotency_key for item in run.write_items] == first_keys
+
+
+def test_revised_draft_discards_old_write_manifest() -> None:
+    run = PipelineRun(block_id="20260101000000-test")
+    first = FlashcardList(cards=[Flashcard(front="Old?", back="Old")])
+    revised = FlashcardList(cards=[Flashcard(front="New?", back="New")])
+
+    run.content_ready()
+    run.draft_ready(first)
+    run.reviewer_approved()
+    run.human_rejected()
+
+    assert run.write_items == []
+
+    run.draft_ready(revised)
+    run.reviewer_approved()
+    run.human_approved()
+
+    assert len(run.write_items) == 1
+    assert run.cards.cards[0].front == "New?"
+    assert run.write_items[0].status == WriteItemStatus.PENDING
+
+
+def test_write_cannot_complete_with_unconfirmed_manifest_item(
+    cards: FlashcardList,
+) -> None:
+    run = PipelineRun(block_id="20260101000000-test")
+    run.content_ready()
+    run.draft_ready(cards)
+    run.reviewer_approved()
+    run.human_approved()
+    run.begin_write()
+
+    with pytest.raises(InvalidWorkflowTransition, match="remain unconfirmed"):
+        run.write_succeeded()
+
+
+def test_partial_write_failure_uses_partial_aggregate_status() -> None:
+    cards = FlashcardList(
+        cards=[
+            Flashcard(front="Q1?", back="A1"),
+            Flashcard(front="Q2?", back="A2"),
+        ]
+    )
+    run = PipelineRun(block_id="20260101000000-test")
+    run.content_ready()
+    run.draft_ready(cards)
+    run.reviewer_approved()
+    run.human_approved()
+    run.begin_write()
+
+    run.mark_item_written(0, 123)
+    run.mark_item_failed(1, "request timed out")
+    run.write_failed("request timed out")
+
+    assert run.write_status == WriteStatus.PARTIAL
+    assert run.write_items[0].status == WriteItemStatus.WRITTEN
+    assert run.write_items[0].anki_note_id == 123
+    assert run.write_items[1].status == WriteItemStatus.FAILED
