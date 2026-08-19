@@ -16,7 +16,6 @@ from pydantic import BaseModel, Field
 
 from .models import Flashcard, FlashcardList
 
-
 IDEMPOTENCY_KEY_PREFIX = "local_anki_agent_id_"
 IDEMPOTENCY_DIGEST_LENGTH = 24
 

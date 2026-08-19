@@ -33,8 +33,8 @@ from src.anki_pipeline.errors import ConfigurationError, PipelineError
 from src.anki_pipeline.logger import PipelineLogger
 from src.anki_pipeline.orchestrator import replay_workflow
 from src.anki_pipeline.retry import retry_call
-from src.anki_pipeline.run_store import RunStore
 from src.anki_pipeline.routing import selector_func
+from src.anki_pipeline.run_store import RunStore
 from src.anki_pipeline.workflow import HumanDecision, parse_human_decision
 
 
@@ -128,7 +128,7 @@ async def main() -> int:
     '''Run the flashcard generation pipeline.'''
     # Initialize logger for observability
     logger = PipelineLogger()
-    
+
     # Parse CLI arguments
     args = parse_args()
 
@@ -242,7 +242,7 @@ When prompted, type exactly: APPROVE or REJECT{RESET}
         if hasattr(msg, 'source') and hasattr(msg, 'content'):
             source = msg.source
             content = str(msg.content)[:500]  # Truncate for logging
-            
+
             if source == 'Card_Reviewer':
                 if 'REJECTED' in content:
                     logger.log_rejection(source, content)
@@ -302,7 +302,7 @@ When prompted, type exactly: APPROVE or REJECT{RESET}
     logger.log_outcome('error' if write_failed else 'success', saved_cards=saved_card_count)
     log_path = logger.save()
     print(f'{DIM}Log saved: {log_path}{RESET}')
-    
+
     return 1 if write_failed else 0
 
 

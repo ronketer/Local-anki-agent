@@ -8,7 +8,6 @@ from pathlib import Path
 
 from .workflow import PipelineRun
 
-
 DEFAULT_RUN_STATE_DIR = Path("run_state")
 
 

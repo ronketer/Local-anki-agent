@@ -19,7 +19,7 @@ from autogen_agentchat.base import ChatAgent
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
 from .config import config
-from .routing import KNOWLEDGE_MANAGER_TOOLS, selector_func
+from .routing import KNOWLEDGE_MANAGER_TOOLS
 
 # System prompts following best practices for instruction clarity
 KNOWLEDGE_MANAGER_PROMPT = """You orchestrate a flashcard creation pipeline.

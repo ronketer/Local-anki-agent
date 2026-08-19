@@ -10,9 +10,9 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from .errors import AnkiResponseError, PipelineError
-from .tools import add_note as add_note_to_anki, find_note_ids_by_tag
+from .tools import add_note as add_note_to_anki
+from .tools import find_note_ids_by_tag
 from .workflow import FailureRecord, PipelineRun
-
 
 PersistRun = Callable[[PipelineRun], object]
 FindNotes = Callable[[str], list[int]]
