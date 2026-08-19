@@ -197,18 +197,43 @@ class PipelineRun(BaseModel):
         self._initialize_write_manifest()
         self._touch()
 
-    @property
-    def can_write(self) -> bool:
-        """Whether application code is currently authorized to write to Anki."""
-        manifest_matches_cards = len(self.write_items) == len(self.cards.cards) and all(
+    def _manifest_matches_cards(self) -> bool:
+        """Whether persisted write metadata still matches the approved cards."""
+        return len(self.write_items) == len(self.cards.cards) and all(
             item.index == index for index, item in enumerate(self.write_items)
         )
+
+    @property
+    def can_write(self) -> bool:
+        """Whether application code is currently authorized for a fresh Anki write."""
         return (
             self.stage == WorkflowStage.AWAITING_HUMAN
             and self.human_decision == HumanDecision.APPROVED
             and bool(self.cards.cards)
-            and manifest_matches_cards
+            and self._manifest_matches_cards()
             and self.write_status == WriteStatus.NOT_STARTED
+        )
+
+    @property
+    def can_resume(self) -> bool:
+        """Whether an interrupted or failed approved write may be reconciled.
+
+        ``WRITING`` + ``IN_PROGRESS`` covers process termination after the run was
+        persisted but before application code could record a terminal failure.
+        ``FAILED`` covers handled write failures.
+        """
+        resumable_state = (
+            self.stage == WorkflowStage.WRITING
+            and self.write_status == WriteStatus.IN_PROGRESS
+        ) or (
+            self.stage == WorkflowStage.FAILED
+            and self.write_status in {WriteStatus.FAILED, WriteStatus.PARTIAL}
+        )
+        return (
+            resumable_state
+            and self.human_decision == HumanDecision.APPROVED
+            and bool(self.cards.cards)
+            and self._manifest_matches_cards()
         )
 
     def begin_write(self) -> None:
@@ -219,6 +244,23 @@ class PipelineRun(BaseModel):
             )
         self.stage = WorkflowStage.WRITING
         self.write_status = WriteStatus.IN_PROGRESS
+        self._touch()
+
+    def resume_write(self) -> None:
+        """Re-enter writing while preserving already-confirmed Anki notes."""
+        if not self.can_resume:
+            raise InvalidWorkflowTransition(
+                "Run is not eligible for deterministic Anki write recovery"
+            )
+
+        for item in self.write_items:
+            if item.status == WriteItemStatus.FAILED:
+                item.status = WriteItemStatus.PENDING
+                item.failure = None
+
+        self.stage = WorkflowStage.WRITING
+        self.write_status = WriteStatus.IN_PROGRESS
+        self.failure = None
         self._touch()
 
     def mark_item_written(self, index: int, note_id: int) -> None:

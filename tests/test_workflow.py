@@ -233,3 +233,72 @@ def test_partial_write_failure_uses_partial_aggregate_status() -> None:
     assert run.write_items[0].status == WriteItemStatus.WRITTEN
     assert run.write_items[0].anki_note_id == 123
     assert run.write_items[1].status == WriteItemStatus.FAILED
+
+def test_failed_partial_write_can_resume_without_reauthorizing() -> None:
+    cards = FlashcardList(
+        cards=[
+            Flashcard(front="Q1?", back="A1"),
+            Flashcard(front="Q2?", back="A2"),
+        ]
+    )
+    run = PipelineRun(block_id="20260101000000-test")
+    run.content_ready()
+    run.draft_ready(cards)
+    run.reviewer_approved()
+    run.human_approved()
+    run.begin_write()
+    run.mark_item_written(0, 123)
+    run.mark_item_failed(1, "request timed out")
+    run.write_failed("request timed out")
+
+    assert run.can_resume is True
+
+    run.resume_write()
+
+    assert run.stage == WorkflowStage.WRITING
+    assert run.write_status == WriteStatus.IN_PROGRESS
+    assert run.human_decision == HumanDecision.APPROVED
+    assert run.write_items[0].status == WriteItemStatus.WRITTEN
+    assert run.write_items[0].anki_note_id == 123
+    assert run.write_items[1].status == WriteItemStatus.PENDING
+    assert run.write_items[1].failure is None
+    assert run.failure is None
+
+
+def test_in_progress_write_can_resume_after_process_restart(cards: FlashcardList) -> None:
+    run = PipelineRun(block_id="20260101000000-test")
+    run.content_ready()
+    run.draft_ready(cards)
+    run.reviewer_approved()
+    run.human_approved()
+    run.begin_write()
+
+    # A persisted WRITING snapshot may be the last durable state if the process
+    # terminates before the application can record a handled failure.
+    restored = PipelineRun.model_validate_json(run.model_dump_json())
+
+    assert restored.stage == WorkflowStage.WRITING
+    assert restored.write_status == WriteStatus.IN_PROGRESS
+    assert restored.can_resume is True
+
+    restored.resume_write()
+
+    assert restored.stage == WorkflowStage.WRITING
+    assert restored.write_status == WriteStatus.IN_PROGRESS
+
+
+def test_completed_run_cannot_resume(cards: FlashcardList) -> None:
+    run = PipelineRun(block_id="20260101000000-test")
+    run.content_ready()
+    run.draft_ready(cards)
+    run.reviewer_approved()
+    run.human_approved()
+    run.begin_write()
+    run.mark_item_written(0, 123)
+    run.write_succeeded()
+
+    assert run.can_resume is False
+
+    with pytest.raises(InvalidWorkflowTransition, match="not eligible"):
+        run.resume_write()
+

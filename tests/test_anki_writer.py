@@ -229,3 +229,73 @@ def test_unexpected_adapter_exception_is_classified() -> None:
     assert run.stage == WorkflowStage.FAILED
     assert run.failure is not None
     assert run.failure.code == "anki_response_error"
+
+def test_resume_skips_confirmed_cards_and_reconciles_ambiguous_failure() -> None:
+    run = approved_run(card_count=3)
+    snapshots: list[PipelineRun] = []
+
+    run.begin_write()
+    run.mark_item_written(0, 501)
+    run.mark_item_failed(1, "request timed out")
+    run.write_failed("request timed out")
+
+    confirmed_tag = run.write_items[0].idempotency_key
+    ambiguous_tag = run.write_items[1].idempotency_key
+    missing_tag = run.write_items[2].idempotency_key
+
+    find_calls: list[str] = []
+    add_calls: list[tuple[str, str, list[str]]] = []
+
+    def find_notes(tag: str) -> list[int]:
+        find_calls.append(tag)
+        if tag == ambiguous_tag:
+            return [502]
+        if tag == missing_tag:
+            return []
+        raise AssertionError("Already-confirmed card should not be reconciled again")
+
+    def add_note(front: str, back: str, tags: list[str]) -> int:
+        add_calls.append((front, back, tags))
+        return 503
+
+    result = write_approved_run(
+        run,
+        save_run=snapshot_saver(snapshots),
+        find_notes=find_notes,
+        add_note=add_note,
+    )
+
+    assert confirmed_tag not in find_calls
+    assert find_calls == [ambiguous_tag, missing_tag]
+    assert add_calls == [("Q3?", "A3", [missing_tag])]
+    assert [item.anki_note_id for item in run.write_items] == [501, 502, 503]
+    assert all(item.status == WriteItemStatus.WRITTEN for item in run.write_items)
+    assert run.stage == WorkflowStage.COMPLETED
+    assert run.write_status == WriteStatus.SUCCEEDED
+    assert "Card 1: already confirmed (501)" in result
+    assert "Card 2: already present (502)" in result
+    assert "Card 3: created (503)" in result
+
+
+def test_resume_finishes_crashed_run_when_all_cards_were_already_confirmed() -> None:
+    run = approved_run(card_count=1)
+    snapshots: list[PipelineRun] = []
+
+    run.begin_write()
+    run.mark_item_written(0, 777)
+
+    result = write_approved_run(
+        run,
+        save_run=snapshot_saver(snapshots),
+        find_notes=lambda tag: (_ for _ in ()).throw(
+            AssertionError("No Anki lookup should be needed")
+        ),
+        add_note=lambda front, back, tags: (_ for _ in ()).throw(
+            AssertionError("No Anki write should be needed")
+        ),
+    )
+
+    assert run.stage == WorkflowStage.COMPLETED
+    assert run.write_status == WriteStatus.SUCCEEDED
+    assert "already confirmed (777)" in result
+

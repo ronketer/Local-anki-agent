@@ -12,7 +12,7 @@ from collections.abc import Callable
 from .errors import AnkiResponseError, PipelineError
 from .tools import add_note as add_note_to_anki
 from .tools import find_note_ids_by_tag
-from .workflow import FailureRecord, PipelineRun
+from .workflow import FailureRecord, PipelineRun, WriteItemStatus
 
 PersistRun = Callable[[PipelineRun], object]
 FindNotes = Callable[[str], list[int]]
@@ -38,12 +38,24 @@ def write_approved_run(
     Progress is persisted after entering the write stage, after every confirmed
     card, and after terminal success or failure.
     """
-    run.begin_write()
+    if run.can_write:
+        run.begin_write()
+    elif run.can_resume:
+        run.resume_write()
+    else:
+        run.begin_write()
+
     save_run(run)
 
     results: list[str] = []
 
     for item in run.write_items:
+        if item.status == WriteItemStatus.WRITTEN:
+            results.append(
+                f"Card {item.index + 1}: already confirmed ({item.anki_note_id})"
+            )
+            continue
+
         card = run.cards.cards[item.index]
 
         try:

@@ -14,6 +14,7 @@ This project demonstrates:
 Usage:
     python main.py                  # Run pipeline with human review
     python main.py --block ID       # Override target block ID
+    python main.py --resume RUN_ID  # Resume a persisted approved Anki write
 '''
 
 import argparse
@@ -35,7 +36,11 @@ from src.anki_pipeline.orchestrator import replay_workflow
 from src.anki_pipeline.retry import retry_call
 from src.anki_pipeline.routing import selector_func
 from src.anki_pipeline.run_store import RunStore
-from src.anki_pipeline.workflow import HumanDecision, parse_human_decision
+from src.anki_pipeline.workflow import (
+    HumanDecision,
+    InvalidWorkflowTransition,
+    parse_human_decision,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,9 +49,18 @@ def parse_args() -> argparse.Namespace:
         description='Generate Anki flashcards from Siyuan Notes using AI agents.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        '--block', '-b', type=str,
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument(
+        '--block',
+        '-b',
+        type=str,
         help='Override TARGET_BLOCK_ID from .env',
+    )
+    source.add_argument(
+        '--resume',
+        type=str,
+        metavar='RUN_ID',
+        help='Resume a persisted, previously approved Anki write',
     )
     return parser.parse_args()
 
@@ -124,6 +138,88 @@ def format_agent_message(source: str, content: str) -> str:
     return f'{header}\n{content}'
 
 
+def resume_persisted_run(run_id: str, logger: PipelineLogger) -> int:
+    """Resume only the deterministic Anki-write portion of a persisted run."""
+    run_store = RunStore()
+
+    try:
+        run = run_store.load(run_id)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f'{YELLOW}Cannot load persisted run {run_id!r}: {exc}{RESET}')
+        logger.log_agent_message(
+            'Application',
+            json.dumps(
+                {
+                    'code': 'resume_state_error',
+                    'message': str(exc),
+                    'run_id': run_id,
+                },
+                ensure_ascii=False,
+            ),
+            'resume_error',
+        )
+        logger.log_outcome('error', saved_cards=0)
+        logger.save()
+        return 1
+
+    if not run.can_resume:
+        error = InvalidWorkflowTransition(
+            'Run is not resumable '
+            f'(stage={run.stage.value}, write_status={run.write_status.value}, '
+            f'approved={run.human_decision.value})'
+        )
+        print(f'{YELLOW}{error}{RESET}')
+        logger.log_agent_message(
+            'Application',
+            json.dumps(
+                {
+                    'code': 'invalid_resume_state',
+                    'message': str(error),
+                    'run_id': run.run_id,
+                },
+                ensure_ascii=False,
+            ),
+            'resume_error',
+        )
+        logger.log_outcome('error', saved_cards=0)
+        logger.save()
+        return 1
+
+    print(
+        f'{CYAN}Resuming approved Anki write for run {run.run_id} '
+        f'({len(run.cards.cards)} cards)...{RESET}'
+    )
+
+    try:
+        result = write_approved_run(run, save_run=run_store.save)
+    except PipelineError as exc:
+        print(
+            f'{YELLOW}Anki recovery failed '
+            f'[{exc.code}, retryable={exc.retryable}]: {exc}{RESET}'
+        )
+        logger.log_agent_message(
+            'Application',
+            json.dumps(exc.as_dict(), ensure_ascii=False),
+            'integration_error',
+        )
+        logger.log_outcome('error', saved_cards=0)
+        logger.save()
+        return 1
+
+    saved_card_count = len(run.cards.cards)
+    print(f'{GREEN}{result}{RESET}')
+    logger.log_tool_call(
+        'Application',
+        'resume_approved_run',
+        {'run_id': run.run_id, 'card_count': saved_card_count},
+        result,
+    )
+    logger.log_outcome('success', saved_cards=saved_card_count)
+    log_path = logger.save()
+    print(f'{DIM}Log saved: {log_path}{RESET}')
+    return 0
+
+
 async def main() -> int:
     '''Run the flashcard generation pipeline.'''
     # Initialize logger for observability
@@ -131,6 +227,10 @@ async def main() -> int:
 
     # Parse CLI arguments
     args = parse_args()
+
+    # Recovery deliberately bypasses Siyuan, AutoGen, and LLM initialization.
+    if args.resume:
+        return resume_persisted_run(args.resume, logger)
 
     # Override block ID if provided
     if args.block:
